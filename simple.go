@@ -2,133 +2,185 @@ package gcache
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/limpo1989/gcache/internal/pqueue"
 )
 
 // SimpleCache has no clear priority for evict cache. It depends on key-value map order.
 type SimpleCache[K comparable, V any] struct {
 	baseCache[K, V]
-	items map[K]*simpleItem[V]
+	items map[K]*simpleItem[K, V]
 }
 
 func newSimpleCache[K comparable, V any](cb *CacheBuilder[K, V]) *SimpleCache[K, V] {
 	c := &SimpleCache[K, V]{}
 	buildCache(&c.baseCache, cb)
+	c.fetch = c.getValue
 
 	c.init()
-	c.loadGroup.cache = c
 	return c
 }
 
 func (c *SimpleCache[K, V]) init() {
 	if c.size <= 0 {
-		c.items = make(map[K]*simpleItem[V])
+		c.items = make(map[K]*simpleItem[K, V])
 	} else {
-		c.items = make(map[K]*simpleItem[V], c.size)
+		c.items = make(map[K]*simpleItem[K, V], c.size)
 	}
 }
 
 // Set a new key-value pair
 func (c *SimpleCache[K, V]) Set(key K, value V) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, err := c.set(key, value)
-	return err
+	return c.SetWithExpire(key, value, c.expiration)
 }
 
-// Set a new key-value pair with an expiration time
+// SetWithExpire set a new key-value pair with an expiration time
 func (c *SimpleCache[K, V]) SetWithExpire(key K, value V, expiration time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	item, err := c.set(key, value)
-	if err != nil {
-		return err
-	}
-
-	t := c.clock.Now().Add(expiration)
-	item.expiration = &t
-	return nil
+	return c.setWithExpire(key, c.obtain(value), expiration)
 }
 
-func (c *SimpleCache[K, V]) set(key K, value V) (*simpleItem[V], error) {
+func (c *SimpleCache[K, V]) setWithExpire(key K, value *V, expiration time.Duration) error {
 	// Check for existing item
 	item, ok := c.items[key]
 	if ok {
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
 		item.value = value
+		item.expiration = c.calcExpiration(expiration)
+		if item.elem != nil {
+			if item.expiration.IsZero() {
+				c.expirations.Remove(item.elem)
+				item.elem = nil
+			} else {
+				c.expirations.Update(item.elem, item.expiration.UnixNano())
+			}
+		}
 	} else {
 		// Verify size not exceeded
 		if (len(c.items) >= c.size) && c.size > 0 {
 			c.evict(1)
 		}
-		item = &simpleItem[V]{
-			clock: c.clock,
-			value: value,
+		item = &simpleItem[K, V]{
+			value:      value,
+			expiration: c.calcExpiration(expiration),
+		}
+		if !item.expiration.IsZero() {
+			item.elem = &pqueue.Elem[K]{Value: key, Priority: item.expiration.UnixNano()}
+			c.expirations.Push(item.elem)
 		}
 		c.items[key] = item
-	}
-
-	if c.expiration != nil {
-		t := c.clock.Now().Add(*c.expiration)
-		item.expiration = &t
 	}
 
 	if c.addedFunc != nil {
 		c.addedFunc(key, value)
 	}
 
-	return item, nil
+	return nil
 }
 
 // Get a value from cache pool using key if it exists.
 // If it does not exists key and has LoaderFunc,
 // generate a value using `LoaderFunc` method returns value.
-func (c *SimpleCache[K, V]) Get(ctx context.Context, key K) (V, error) {
-	v, err := c.get(key, false)
-	if err == KeyNotFoundError {
+func (c *SimpleCache[K, V]) Get(ctx context.Context, key K) (*V, error) {
+	if c.allocator != nil {
+		panic("Arena enabled please use GetFn")
+	}
+	v, err := c.getValue(key, false, true, false)
+	if nil != err && errors.Is(err, ErrKeyNotFound) {
 		return c.getWithLoader(ctx, key, true)
 	}
 	return v, err
 }
 
-// GetIFPresent gets a value from cache pool using key if it exists.
-// If it does not exists key, returns KeyNotFoundError.
-// And send a request which refresh value for specified key if cache object has LoaderFunc.
-func (c *SimpleCache[K, V]) GetIFPresent(ctx context.Context, key K) (V, error) {
-	v, err := c.get(key, false)
-	if err == KeyNotFoundError {
-		return c.getWithLoader(ctx, key, false)
+// GetIfPresent gets a value from cache pool using key if it exists.
+// If it does not exists key, returns ErrKeyNotFound.
+func (c *SimpleCache[K, V]) GetIfPresent(ctx context.Context, key K) (*V, error) {
+	if c.allocator != nil {
+		panic("Arena enabled please use GetIfPresentFn")
 	}
-	return v, nil
+	return c.getValue(key, false, true, false)
+}
+
+// GetFn callbacks the value for the specified key if it is present in the cache.
+// If the key is not present in the cache and the cache has LoaderFunc,
+// invoke the `LoaderFunc` function and inserts the key-value pair in the cache.
+// If the key is not present in the cache and the cache does not have a LoaderFunc,
+// Callback ErrKeyNotFound.
+func (c *SimpleCache[K, V]) GetFn(ctx context.Context, key K, fn func(value *V, err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	v, err := c.getValue(key, false, false, false)
+	if nil != err && errors.Is(err, ErrKeyNotFound) {
+		v, err = c.getWithLoader(ctx, key, false)
+	}
+
+	fn(v, err)
+}
+
+// GetIfPresentFn callbacks the value for the specified key if it is present in the cache.
+// Callback ErrKeyNotFound if the key is not present.
+func (c *SimpleCache[K, V]) GetIfPresentFn(ctx context.Context, key K, fn func(value *V, err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, err := c.getValue(key, false, false, false)
+	fn(v, err)
+}
+
+// Touch updates the expiration time of an existing key.
+// If the key is not present in the cache and the cache has LoaderFunc,
+// invoke the `LoaderFunc` function and inserts the key-value pair in the cache.
+// If the key is not present in the cache and the cache does not have a LoaderFunc,
+// return ErrKeyNotFound.
+func (c *SimpleCache[K, V]) Touch(ctx context.Context, key K) error {
+	_, err := c.getValue(key, false, true, true)
+	if nil != err && errors.Is(err, ErrKeyNotFound) {
+		_, err = c.getWithLoader(ctx, key, true)
+	}
+	return err
 }
 
 // Compact clear expired items
 func (c *SimpleCache[K, V]) Compact() (n int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for key, item := range c.items {
-		if item.IsExpired(nil) {
-			c.remove(key)
-			n++
+	var now = c.clock.Now().UnixNano()
+	for !c.expirations.IsEmpty() {
+		item := c.expirations.Peek()
+		if now < item.Priority {
+			break
 		}
+		c.remove(item.Value)
+		n++
 	}
 	return
 }
 
-func (c *SimpleCache[K, V]) get(key K, onLoad bool) (V, error) {
-	return c.getValue(key, onLoad)
-}
-
-func (c *SimpleCache[K, V]) getValue(key K, onLoad bool) (V, error) {
-	c.mu.Lock()
+func (c *SimpleCache[K, V]) getValue(key K, onLoad, withLock, renewal bool) (*V, error) {
+	if withLock {
+		c.mu.Lock()
+	}
 	item, ok := c.items[key]
 	if ok {
-		if !item.IsExpired(nil) {
+		if !item.IsExpired(time.Time{}, c.clock) {
 			v := item.value
-			if c.autoRenewal && c.expiration != nil {
-				t := item.clock.Now().Add(*c.expiration)
-				item.expiration = &t
+			if renewal && c.expiration > 0 {
+				item.expiration = c.calcExpiration(c.expiration)
+				if item.elem != nil {
+					c.expirations.Update(item.elem, item.expiration.UnixNano())
+				} else {
+					item.elem = &pqueue.Elem[K]{Value: key, Priority: item.expiration.UnixNano()}
+					c.expirations.Push(item.elem)
+				}
 			}
-			c.mu.Unlock()
+			if withLock {
+				c.mu.Unlock()
+			}
 			if !onLoad {
 				c.stats.IncrHitCount()
 			}
@@ -136,39 +188,24 @@ func (c *SimpleCache[K, V]) getValue(key K, onLoad bool) (V, error) {
 		}
 		c.remove(key)
 	}
-	c.mu.Unlock()
+	if withLock {
+		c.mu.Unlock()
+	}
 	if !onLoad {
 		c.stats.IncrMissCount()
 	}
-	var zero V
-	return zero, KeyNotFoundError
+	return nil, ErrKeyNotFound
 }
 
-func (c *SimpleCache[K, V]) getWithLoader(ctx context.Context, key K, isWait bool) (V, error) {
-	var zero V
+func (c *SimpleCache[K, V]) getWithLoader(ctx context.Context, key K, withLock bool) (*V, error) {
 	if c.loaderExpireFunc == nil {
-		return zero, KeyNotFoundError
+		return nil, ErrKeyNotFound
 	}
-	value, _, err := c.load(ctx, key, func(v V, expiration *time.Duration, e error) (V, error) {
-		if e != nil {
-			return zero, e
-		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		item, err := c.set(key, v)
-		if err != nil {
-			return zero, err
-		}
-		if expiration != nil {
-			t := c.clock.Now().Add(*expiration)
-			item.expiration = &t
-		}
-		return v, nil
-	}, isWait)
-	if err != nil {
-		return zero, err
-	}
-	return value, nil
+	return c.load(ctx, key, withLock, func(val V, expiration time.Duration) (*V, error) {
+		value := c.obtain(val)
+		e := c.setWithExpire(key, value, expiration)
+		return value, e
+	})
 }
 
 func (c *SimpleCache[K, V]) evict(count int) {
@@ -178,7 +215,7 @@ func (c *SimpleCache[K, V]) evict(count int) {
 		if current >= count {
 			return
 		}
-		if item.expiration == nil || now.After(*item.expiration) {
+		if item.expiration.IsZero() || now.After(item.expiration) {
 			defer c.remove(key)
 			current++
 		}
@@ -189,16 +226,15 @@ func (c *SimpleCache[K, V]) evict(count int) {
 func (c *SimpleCache[K, V]) Has(key K) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	now := time.Now()
-	return c.has(key, &now)
+	return c.has(key, time.Time{})
 }
 
-func (c *SimpleCache[K, V]) has(key K, now *time.Time) bool {
+func (c *SimpleCache[K, V]) has(key K, now time.Time) bool {
 	item, ok := c.items[key]
 	if !ok {
 		return false
 	}
-	return !item.IsExpired(now)
+	return !item.IsExpired(now, c.clock)
 }
 
 // Remove removes the provided key from the cache.
@@ -213,100 +249,77 @@ func (c *SimpleCache[K, V]) remove(key K) bool {
 	item, ok := c.items[key]
 	if ok {
 		delete(c.items, key)
+		if item.elem != nil {
+			c.expirations.Remove(item.elem)
+		}
 		if c.evictedFunc != nil {
 			c.evictedFunc(key, item.value)
 		}
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
+
+		item.value = nil
+		item.elem = nil
 		return true
 	}
 	return false
 }
 
-// Returns a slice of the keys in the cache.
-func (c *SimpleCache[K, V]) keys() []K {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	keys := make([]K, len(c.items))
-	var i = 0
-	for k := range c.items {
-		keys[i] = k
-		i++
-	}
-	return keys
-}
-
-// GetALL returns all key-value pairs in the cache.
-func (c *SimpleCache[K, V]) GetALL(checkExpired bool) map[K]V {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	items := make(map[K]V, len(c.items))
-	now := time.Now()
-	for k, item := range c.items {
-		if !checkExpired || c.has(k, &now) {
-			items[k] = item.value
-		}
-	}
-	return items
-}
-
 // Keys returns a slice of the keys in the cache.
-func (c *SimpleCache[K, V]) Keys(checkExpired bool) []K {
+func (c *SimpleCache[K, V]) Keys() []K {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	keys := make([]K, 0, len(c.items))
-	now := time.Now()
 	for k := range c.items {
-		if !checkExpired || c.has(k, &now) {
-			keys = append(keys, k)
-		}
+		keys = append(keys, k)
 	}
 	return keys
 }
 
 // Len returns the number of items in the cache.
-func (c *SimpleCache[K, V]) Len(checkExpired bool) int {
+func (c *SimpleCache[K, V]) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if !checkExpired {
-		return len(c.items)
-	}
-	var length int
-	now := time.Now()
-	for k := range c.items {
-		if c.has(k, &now) {
-			length++
-		}
-	}
-	return length
+	return len(c.items)
 }
 
-// Completely clear the cache
-func (c *SimpleCache[K, V]) Purge() {
+// Clear removes all key-value pairs from the cache
+func (c *SimpleCache[K, V]) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.purgeVisitorFunc != nil {
-		for key, item := range c.items {
+	for key, item := range c.items {
+		if item.elem != nil {
+			c.expirations.Remove(item.elem)
+		}
+		if c.purgeVisitorFunc != nil {
 			c.purgeVisitorFunc(key, item.value)
 		}
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
+
+		item.value = nil
+		item.elem = nil
 	}
 
 	c.init()
 }
 
-type simpleItem[V any] struct {
-	clock      Clock
-	value      V
-	expiration *time.Time
+type simpleItem[K comparable, V any] struct {
+	value      *V
+	expiration time.Time
+	elem       *pqueue.Elem[K]
 }
 
 // IsExpired returns boolean value whether this item is expired or not.
-func (si *simpleItem[V]) IsExpired(now *time.Time) bool {
-	if si.expiration == nil {
+func (si *simpleItem[K, V]) IsExpired(now time.Time, clock Clock) bool {
+	if si.expiration.IsZero() {
 		return false
 	}
-	if now == nil {
-		t := si.clock.Now()
-		now = &t
+	if now.IsZero() {
+		now = clock.Now()
 	}
-	return si.expiration.Before(*now)
+	return si.expiration.Before(now)
 }

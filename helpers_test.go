@@ -2,19 +2,30 @@ package gcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
 
-func loader(ctx context.Context, key interface{}) (interface{}, error) {
-	return fmt.Sprintf("valueFor%s", key), nil
+func loader[K comparable, V any](ctx context.Context, key K) (V, error) {
+
+	var zero V
+	var value = reflect.New(reflect.TypeOf(zero)).Elem()
+	switch value.Kind() {
+	case reflect.String:
+		value.SetString(fmt.Sprintf("valueFor%v", key))
+	default:
+	}
+
+	return value.Interface().(V), nil
 }
 
-func testSetCache(t *testing.T, gc Cache[any, any], numbers int) {
+func testSetCache(t *testing.T, gc Cache[string, string], numbers int) {
 	for i := 0; i < numbers; i++ {
 		key := fmt.Sprintf("Key-%d", i)
-		value, err := loader(context.Background(), key)
+		value, err := loader[string, string](context.Background(), key)
 		if err != nil {
 			t.Error(err)
 			return
@@ -23,63 +34,63 @@ func testSetCache(t *testing.T, gc Cache[any, any], numbers int) {
 	}
 }
 
-func testGetCache(t *testing.T, gc Cache[any, any], numbers int) {
+func testGetCache(t *testing.T, gc Cache[string, string], numbers int) {
 	for i := 0; i < numbers; i++ {
 		key := fmt.Sprintf("Key-%d", i)
 		v, err := gc.Get(context.Background(), key)
 		if err != nil {
 			t.Errorf("Unexpected error: %v", err)
 		}
-		expectedV, _ := loader(context.Background(), key)
-		if v != expectedV {
-			t.Errorf("Expected value is %v, not %v", expectedV, v)
+		expectedV, _ := loader[string, string](context.Background(), key)
+		if *v != expectedV {
+			t.Errorf("Expected value is %v, not %v", expectedV, *v)
 		}
 	}
 }
 
 func testGetIFPresent(t *testing.T, evT string) {
+	var value = "value"
 	cache :=
-		New[any, any](8).
+		New[any, string](8).
 			EvictType(evT).
 			LoaderFunc(
-				func(ctx context.Context, key interface{}) (interface{}, error) {
-					return "value", nil
+				func(ctx context.Context, key any) (string, error) {
+					return value, nil
 				}).
 			Build()
 
-	v, err := cache.GetIFPresent(context.Background(), "key")
-	if err != KeyNotFoundError {
+	_, err := cache.GetIfPresent(context.Background(), "key")
+	if !errors.Is(err, ErrKeyNotFound) {
 		t.Errorf("err should not be %v", err)
-	}
-
-	time.Sleep(2 * time.Millisecond)
-
-	v, err = cache.GetIFPresent(context.Background(), "key")
-	if err != nil {
-		t.Errorf("err should not be %v", err)
-	}
-	if v != "value" {
-		t.Errorf("v should not be %v", v)
 	}
 }
 
-func setItemsByRange(t *testing.T, c Cache[any, any], start, end int) {
+func setItemsByRange(t *testing.T, c Cache[int, int], start, end int) {
 	for i := start; i < end; i++ {
-		if err := c.Set(i, i); err != nil {
+		val := i
+		if err := c.Set(i, val); err != nil {
 			t.Error(err)
 		}
 	}
 }
 
-func keysToMap(keys []interface{}) map[interface{}]struct{} {
-	m := make(map[interface{}]struct{}, len(keys))
+func touchItemsByRange(t *testing.T, c Cache[int, int], start, end int) {
+	for i := start; i < end; i++ {
+		if err := c.Touch(t.Context(), i); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func keysToMap(keys []any) map[any]struct{} {
+	m := make(map[any]struct{}, len(keys))
 	for _, k := range keys {
 		m[k] = struct{}{}
 	}
 	return m
 }
 
-func checkItemsByRange(t *testing.T, keys []interface{}, m map[interface{}]interface{}, size, start, end int) {
+func checkItemsByRange(t *testing.T, keys []any, m map[any]any, size, start, end int) {
 	if len(keys) != size {
 		t.Fatalf("%v != %v", len(keys), size)
 	} else if len(m) != size {
@@ -105,60 +116,72 @@ func checkItemsByRange(t *testing.T, keys []interface{}, m map[interface{}]inter
 func testExpiredItems(t *testing.T, evT string) {
 	size := 8
 	cache :=
-		New[any, any](size).
-			Expiration(time.Millisecond, false).
+		New[int, int](size).
+			Expiration(time.Millisecond).
 			EvictType(evT).
 			Build()
 
 	setItemsByRange(t, cache, 0, size)
-	checkItemsByRange(t, cache.Keys(true), cache.GetALL(true), cache.Len(true), 0, size)
 
 	time.Sleep(time.Millisecond)
+	cache.Compact()
 
-	checkItemsByRange(t, cache.Keys(false), cache.GetALL(false), cache.Len(false), 0, size)
-
-	if l := cache.Len(true); l != 0 {
+	if l := cache.Len(); l != 0 {
 		t.Fatalf("GetALL should returns no items, but got length %v", l)
 	}
 
-	cache.Set(1, 1)
-	m := cache.GetALL(true)
-	if len(m) != 1 {
-		t.Fatalf("%v != %v", len(m), 1)
-	} else if l := cache.Len(true); l != 1 {
-		t.Fatalf("%v != %v", l, 1)
+	value := 1
+	cache.Set(1, value)
+}
+
+func testTouchItems(t *testing.T, evT string) {
+	size := 8
+	cache :=
+		New[int, int](size).
+			Expiration(time.Millisecond * 2).
+			EvictType(evT).
+			Build()
+
+	setItemsByRange(t, cache, 0, size)
+	time.Sleep(time.Millisecond)
+	touchItemsByRange(t, cache, 0, size)
+	time.Sleep(time.Millisecond)
+	cache.Compact()
+
+	if l := cache.Len(); l != size {
+		t.Fatalf("GetALL should returns %d items, but got length %v", size, l)
 	}
-	if m[1] != 1 {
-		t.Fatalf("%v != %v", m[1], 1)
+
+	value := 1
+	cache.Set(1, value)
+}
+
+func getSimpleEvictedFunc[K comparable, V any](t *testing.T) func(K, *V) {
+	return func(key K, value *V) {
+		t.Logf("Key=%v Value=%v will be evicted.\n", key, *value)
 	}
 }
 
-func getSimpleEvictedFunc(t *testing.T) func(interface{}, interface{}) {
-	return func(key, value interface{}) {
-		t.Logf("Key=%v Value=%v will be evicted.\n", key, value)
-	}
-}
-
-func buildTestCache(t *testing.T, tp string, size int) Cache[any, any] {
-	return New[any, any](size).
+func buildTestCache[K comparable, V any](t *testing.T, tp string, size int) Cache[K, V] {
+	return New[K, V](size).
 		EvictType(tp).
-		EvictedFunc(getSimpleEvictedFunc(t)).
+		EvictedFunc(getSimpleEvictedFunc[K, V](t)).
 		Build()
 }
 
-func buildTestLoadingCache(t *testing.T, tp string, size int, loader LoaderFunc[any, any]) Cache[any, any] {
-	return New[any, any](size).
+func buildTestLoadingCache[K comparable, V any](t *testing.T, tp string, size int, loader LoaderFunc[K, V]) Cache[K, V] {
+	return New[K, V](size).
 		EvictType(tp).
 		LoaderFunc(loader).
-		EvictedFunc(getSimpleEvictedFunc(t)).
+		EvictedFunc(getSimpleEvictedFunc[K, V](t)).
 		Build()
 }
 
-func buildTestLoadingCacheWithExpiration(t *testing.T, tp string, size int, ep time.Duration) Cache[any, any] {
-	return New[any, any](size).
+func buildTestLoadingCacheWithExpiration[K comparable, V any](t *testing.T, tp string, size int, ep time.Duration) Cache[K, V] {
+	return New[K, V](size).
 		EvictType(tp).
-		Expiration(ep, false).
-		LoaderFunc(loader).
-		EvictedFunc(getSimpleEvictedFunc(t)).
+		Expiration(ep).
+		LoaderFunc(loader[K, V]).
+		EvictedFunc(getSimpleEvictedFunc[K, V](t)).
 		Build()
 }

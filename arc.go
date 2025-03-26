@@ -3,7 +3,10 @@ package gcache
 import (
 	"container/list"
 	"context"
+	"errors"
 	"time"
+
+	"github.com/limpo1989/gcache/internal/pqueue"
 )
 
 // Constantly balances between LRU and LFU, to improve the combined result.
@@ -21,9 +24,9 @@ type ARC[K comparable, V any] struct {
 func newARC[K comparable, V any](cb *CacheBuilder[K, V]) *ARC[K, V] {
 	c := &ARC[K, V]{}
 	buildCache(&c.baseCache, cb)
+	c.fetch = c.getValue
 
 	c.init()
-	c.loadGroup.cache = c
 	return c
 }
 
@@ -53,49 +56,60 @@ func (c *ARC[K, V]) replace(key K) {
 	item, ok := c.items[old]
 	if ok {
 		delete(c.items, old)
+		if item.elem != nil {
+			c.expirations.Remove(item.elem)
+		}
 		if c.evictedFunc != nil {
 			c.evictedFunc(item.key, item.value)
 		}
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
+
+		item.value = nil
+		item.elem = nil
 	}
 }
 
 func (c *ARC[K, V]) Set(key K, value V) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, err := c.set(key, value)
-	return err
+	return c.SetWithExpire(key, value, c.expiration)
 }
 
-// Set a new key-value pair with an expiration time
+// SetWithExpire a new key-value pair with an expiration time
 func (c *ARC[K, V]) SetWithExpire(key K, value V, expiration time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	item, err := c.set(key, value)
-	if err != nil {
-		return err
-	}
-
-	t := c.clock.Now().Add(expiration)
-	item.expiration = &t
-	return nil
+	return c.setWithExpire(key, c.obtain(value), expiration)
 }
 
-func (c *ARC[K, V]) set(key K, value V) (*arcItem[K, V], error) {
+func (c *ARC[K, V]) setWithExpire(key K, value *V, expiration time.Duration) error {
 	item, ok := c.items[key]
 	if ok {
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
 		item.value = value
+		item.expiration = c.calcExpiration(expiration)
+		if item.elem != nil {
+			if item.expiration.IsZero() {
+				c.expirations.Remove(item.elem)
+				item.elem = nil
+			} else {
+				c.expirations.Update(item.elem, item.expiration.UnixNano())
+			}
+		}
 	} else {
 		item = &arcItem[K, V]{
-			clock: c.clock,
-			key:   key,
-			value: value,
+			key:        key,
+			value:      value,
+			expiration: c.calcExpiration(expiration),
 		}
-		c.items[key] = item
-	}
+		if !item.expiration.IsZero() {
+			item.elem = &pqueue.Elem[K]{Value: key, Priority: item.expiration.UnixNano()}
+			c.expirations.Push(item.elem)
+		}
 
-	if c.expiration != nil {
-		t := c.clock.Now().Add(*c.expiration)
-		item.expiration = &t
+		c.items[key] = item
 	}
 
 	defer func() {
@@ -105,23 +119,23 @@ func (c *ARC[K, V]) set(key K, value V) (*arcItem[K, V], error) {
 	}()
 
 	if c.t1.Has(key) || c.t2.Has(key) {
-		return item, nil
+		return nil
 	}
 
 	if elt := c.b1.Lookup(key); elt != nil {
-		c.setPart(minInt(c.size, c.part+maxInt(c.b2.Len()/c.b1.Len(), 1)))
+		c.setPart(min(c.size, c.part+max(c.b2.Len()/c.b1.Len(), 1)))
 		c.replace(key)
 		c.b1.Remove(key, elt)
 		c.t2.PushFront(key)
-		return item, nil
+		return nil
 	}
 
 	if elt := c.b2.Lookup(key); elt != nil {
-		c.setPart(maxInt(0, c.part-maxInt(c.b1.Len()/c.b2.Len(), 1)))
+		c.setPart(max(0, c.part-max(c.b1.Len()/c.b2.Len(), 1)))
 		c.replace(key)
 		c.b2.Remove(key, elt)
 		c.t2.PushFront(key)
-		return item, nil
+		return nil
 	}
 
 	if c.isCacheFull() && c.t1.Len()+c.b1.Len() == c.size {
@@ -133,9 +147,18 @@ func (c *ARC[K, V]) set(key K, value V) (*arcItem[K, V], error) {
 			item, ok := c.items[pop]
 			if ok {
 				delete(c.items, pop)
+				if item.elem != nil {
+					c.expirations.Remove(item.elem)
+				}
 				if c.evictedFunc != nil {
 					c.evictedFunc(item.key, item.value)
 				}
+				if nil != c.allocator {
+					c.allocator.Free(item.value)
+				}
+
+				item.value = nil
+				item.elem = nil
 			}
 		}
 	} else {
@@ -152,58 +175,105 @@ func (c *ARC[K, V]) set(key K, value V) (*arcItem[K, V], error) {
 		}
 	}
 	c.t1.PushFront(key)
-	return item, nil
+	return nil
 }
 
 // Get a value from cache pool using key if it exists. If not exists and it has LoaderFunc, it will generate the value using you have specified LoaderFunc method returns value.
-func (c *ARC[K, V]) Get(ctx context.Context, key K) (V, error) {
-	v, err := c.get(key, false)
-	if err == KeyNotFoundError {
+func (c *ARC[K, V]) Get(ctx context.Context, key K) (*V, error) {
+	if c.allocator != nil {
+		panic("Arena enabled please use GetFn")
+	}
+	v, err := c.getValue(key, false, true, false)
+	if nil != err && errors.Is(err, ErrKeyNotFound) {
 		return c.getWithLoader(ctx, key, true)
 	}
 	return v, err
 }
 
-// GetIFPresent gets a value from cache pool using key if it exists.
-// If it does not exists key, returns KeyNotFoundError.
-// And send a request which refresh value for specified key if cache object has LoaderFunc.
-func (c *ARC[K, V]) GetIFPresent(ctx context.Context, key K) (V, error) {
-	v, err := c.get(key, false)
-	if err == KeyNotFoundError {
-		return c.getWithLoader(ctx, key, false)
+// GetIfPresent gets a value from cache pool using key if it exists.
+// If it does not exists key, returns ErrKeyNotFound.
+func (c *ARC[K, V]) GetIfPresent(ctx context.Context, key K) (*V, error) {
+	if c.allocator != nil {
+		panic("Arena enabled please use GetIfPresentFn")
 	}
-	return v, err
+	return c.getValue(key, false, true, false)
+}
+
+// GetFn callbacks the value for the specified key if it is present in the cache.
+// If the key is not present in the cache and the cache has LoaderFunc,
+// invoke the `LoaderFunc` function and inserts the key-value pair in the cache.
+// If the key is not present in the cache and the cache does not have a LoaderFunc,
+// Callback ErrKeyNotFound.
+func (c *ARC[K, V]) GetFn(ctx context.Context, key K, fn func(value *V, err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	v, err := c.getValue(key, false, false, false)
+	if nil != err && errors.Is(err, ErrKeyNotFound) {
+		v, err = c.getWithLoader(ctx, key, false)
+	}
+
+	fn(v, err)
+}
+
+// GetIfPresentFn callbacks the value for the specified key if it is present in the cache.
+// Callback ErrKeyNotFound if the key is not present.
+func (c *ARC[K, V]) GetIfPresentFn(ctx context.Context, key K, fn func(value *V, err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, err := c.getValue(key, false, false, false)
+	fn(v, err)
+}
+
+// Touch updates the expiration time of an existing key.
+// If the key is not present in the cache and the cache has LoaderFunc,
+// invoke the `LoaderFunc` function and inserts the key-value pair in the cache.
+// If the key is not present in the cache and the cache does not have a LoaderFunc,
+// return ErrKeyNotFound.
+func (c *ARC[K, V]) Touch(ctx context.Context, key K) error {
+	_, err := c.getValue(key, false, true, true)
+	if nil != err && errors.Is(err, ErrKeyNotFound) {
+		_, err = c.getWithLoader(ctx, key, true)
+	}
+	return err
 }
 
 // Compact clear expired items
 func (c *ARC[K, V]) Compact() (n int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	for key, item := range c.items {
-		if item.IsExpired(nil) {
-			c.remove(key)
-			n++
+	now := c.clock.Now().UnixNano()
+	for !c.expirations.IsEmpty() {
+		item := c.expirations.Peek()
+		if now < item.Priority {
+			break
 		}
+		c.remove(item.Value)
+		n++
 	}
 	return
 }
 
-func (c *ARC[K, V]) get(key K, onLoad bool) (V, error) {
-	return c.getValue(key, onLoad)
-}
+func (c *ARC[K, V]) getValue(key K, onLoad, withLock, renewal bool) (*V, error) {
 
-func (c *ARC[K, V]) getValue(key K, onLoad bool) (V, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if withLock {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+	}
+
 	if elt := c.t1.Lookup(key); elt != nil {
 		c.t1.Remove(key, elt)
 		item := c.items[key]
-		if !item.IsExpired(nil) {
+		if !item.IsExpired(time.Time{}, c.clock) {
 			c.t2.PushFront(key)
-			if c.autoRenewal && c.expiration != nil {
-				t := item.clock.Now().Add(*c.expiration)
-				item.expiration = &t
+			if renewal && c.expiration != 0 {
+				item.expiration = c.calcExpiration(c.expiration)
+				if item.elem != nil {
+					c.expirations.Update(item.elem, item.expiration.UnixNano())
+				} else {
+					item.elem = &pqueue.Elem[K]{Value: key, Priority: item.expiration.UnixNano()}
+					c.expirations.Push(item.elem)
+				}
 			}
 			if !onLoad {
 				c.stats.IncrHitCount()
@@ -212,18 +282,32 @@ func (c *ARC[K, V]) getValue(key K, onLoad bool) (V, error) {
 		} else {
 			delete(c.items, key)
 			c.b1.PushFront(key)
+			if item.elem != nil {
+				c.expirations.Remove(item.elem)
+			}
 			if c.evictedFunc != nil {
 				c.evictedFunc(item.key, item.value)
 			}
+			if nil != c.allocator {
+				c.allocator.Free(item.value)
+			}
+
+			item.value = nil
+			item.elem = nil
 		}
 	}
 	if elt := c.t2.Lookup(key); elt != nil {
 		item := c.items[key]
-		if !item.IsExpired(nil) {
+		if !item.IsExpired(time.Time{}, c.clock) {
 			c.t2.MoveToFront(elt)
-			if c.autoRenewal && c.expiration != nil {
-				t := item.clock.Now().Add(*c.expiration)
-				item.expiration = &t
+			if renewal && c.expiration != 0 {
+				item.expiration = c.calcExpiration(c.expiration)
+				if item.elem != nil {
+					c.expirations.Update(item.elem, item.expiration.UnixNano())
+				} else {
+					item.elem = &pqueue.Elem[K]{Value: key, Priority: item.expiration.UnixNano()}
+					c.expirations.Push(item.elem)
+				}
 			}
 			if !onLoad {
 				c.stats.IncrHitCount()
@@ -233,57 +317,50 @@ func (c *ARC[K, V]) getValue(key K, onLoad bool) (V, error) {
 			delete(c.items, key)
 			c.t2.Remove(key, elt)
 			c.b2.PushFront(key)
+			if item.elem != nil {
+				c.expirations.Remove(item.elem)
+			}
 			if c.evictedFunc != nil {
 				c.evictedFunc(item.key, item.value)
 			}
+			if nil != c.allocator {
+				c.allocator.Free(item.value)
+			}
+			item.value = nil
+			item.elem = nil
 		}
 	}
 
 	if !onLoad {
 		c.stats.IncrMissCount()
 	}
-	var zero V
-	return zero, KeyNotFoundError
+	return nil, ErrKeyNotFound
 }
 
-func (c *ARC[K, V]) getWithLoader(ctx context.Context, key K, isWait bool) (V, error) {
-	var zero V
+func (c *ARC[K, V]) getWithLoader(ctx context.Context, key K, withLock bool) (*V, error) {
 	if c.loaderExpireFunc == nil {
-		return zero, KeyNotFoundError
+		return nil, ErrKeyNotFound
 	}
-	value, _, err := c.load(ctx, key, func(v V, expiration *time.Duration, e error) (V, error) {
-		if e != nil {
-			return zero, e
-		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		item, err := c.set(key, v)
-		if err != nil {
-			return zero, err
-		}
-		if expiration != nil {
-			t := c.clock.Now().Add(*expiration)
-			item.expiration = &t
-		}
-		return v, nil
-	}, isWait)
-	return value, err
+	return c.load(ctx, key, withLock, func(val V, expiration time.Duration) (*V, error) {
+		value := c.obtain(val)
+		e := c.setWithExpire(key, value, expiration)
+		return value, e
+	})
 }
 
 // Has checks if key exists in cache
 func (c *ARC[K, V]) Has(key K) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	now := time.Now()
-	return c.has(key, &now)
+	return c.has(key, time.Time{})
 }
 
-func (c *ARC[K, V]) has(key K, now *time.Time) bool {
+func (c *ARC[K, V]) has(key K, now time.Time) bool {
 	item, ok := c.items[key]
 	if !ok {
 		return false
 	}
-	return !item.IsExpired(now)
+	return !item.IsExpired(now, c.clock)
 }
 
 // Remove removes the provided key from the cache.
@@ -300,9 +377,17 @@ func (c *ARC[K, V]) remove(key K) bool {
 		item := c.items[key]
 		delete(c.items, key)
 		c.b1.PushFront(key)
+		if item.elem != nil {
+			c.expirations.Remove(item.elem)
+		}
 		if c.evictedFunc != nil {
 			c.evictedFunc(key, item.value)
 		}
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
+		item.value = nil
+		item.elem = nil
 		return true
 	}
 
@@ -311,69 +396,58 @@ func (c *ARC[K, V]) remove(key K) bool {
 		item := c.items[key]
 		delete(c.items, key)
 		c.b2.PushFront(key)
+		if item.elem != nil {
+			c.expirations.Remove(item.elem)
+		}
 		if c.evictedFunc != nil {
 			c.evictedFunc(key, item.value)
 		}
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
+		item.value = nil
+		item.elem = nil
 		return true
 	}
 
 	return false
 }
 
-// GetALL returns all key-value pairs in the cache.
-func (c *ARC[K, V]) GetALL(checkExpired bool) map[K]V {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	items := make(map[K]V, len(c.items))
-	now := time.Now()
-	for k, item := range c.items {
-		if !checkExpired || c.has(k, &now) {
-			items[k] = item.value
-		}
-	}
-	return items
-}
-
 // Keys returns a slice of the keys in the cache.
-func (c *ARC[K, V]) Keys(checkExpired bool) []K {
+func (c *ARC[K, V]) Keys() []K {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	keys := make([]K, 0, len(c.items))
-	now := time.Now()
 	for k := range c.items {
-		if !checkExpired || c.has(k, &now) {
-			keys = append(keys, k)
-		}
+		keys = append(keys, k)
 	}
 	return keys
 }
 
 // Len returns the number of items in the cache.
-func (c *ARC[K, V]) Len(checkExpired bool) int {
+func (c *ARC[K, V]) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if !checkExpired {
-		return len(c.items)
-	}
-	var length int
-	now := time.Now()
-	for k := range c.items {
-		if c.has(k, &now) {
-			length++
-		}
-	}
-	return length
+	return len(c.items)
 }
 
-// Purge is used to completely clear the cache
-func (c *ARC[K, V]) Purge() {
+// Clear removes all key-value pairs from the cache
+func (c *ARC[K, V]) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.purgeVisitorFunc != nil {
-		for _, item := range c.items {
+	for _, item := range c.items {
+		if item.elem != nil {
+			c.expirations.Remove(item.elem)
+		}
+		if c.purgeVisitorFunc != nil {
 			c.purgeVisitorFunc(item.key, item.value)
 		}
+		if nil != c.allocator {
+			c.allocator.Free(item.value)
+		}
+		item.value = nil
+		item.elem = nil
 	}
 
 	c.init()
@@ -390,15 +464,14 @@ func (c *ARC[K, V]) isCacheFull() bool {
 }
 
 // IsExpired returns boolean value whether this item is expired or not.
-func (it *arcItem[K, V]) IsExpired(now *time.Time) bool {
-	if it.expiration == nil {
+func (it *arcItem[K, V]) IsExpired(now time.Time, clock Clock) bool {
+	if it.expiration.IsZero() {
 		return false
 	}
-	if now == nil {
-		t := it.clock.Now()
-		now = &t
+	if now.IsZero() {
+		now = clock.Now()
 	}
-	return it.expiration.Before(*now)
+	return it.expiration.Before(now)
 }
 
 type arcList[K comparable] struct {
@@ -407,10 +480,10 @@ type arcList[K comparable] struct {
 }
 
 type arcItem[K comparable, V any] struct {
-	clock      Clock
 	key        K
-	value      V
-	expiration *time.Time
+	value      *V
+	expiration time.Time
+	elem       *pqueue.Elem[K]
 }
 
 func newARCList[K comparable]() *arcList[K] {

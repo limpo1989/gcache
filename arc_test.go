@@ -9,7 +9,7 @@ import (
 
 func TestARCGet(t *testing.T) {
 	size := 1000
-	gc := buildTestCache(t, TYPE_ARC, size)
+	gc := buildTestCache[string, string](t, TypeArc, size)
 	testSetCache(t, gc, size)
 	testGetCache(t, gc, size)
 }
@@ -17,22 +17,23 @@ func TestARCGet(t *testing.T) {
 func TestLoadingARCGet(t *testing.T) {
 	size := 1000
 	numbers := 1000
-	testGetCache(t, buildTestLoadingCache(t, TYPE_ARC, size, loader), numbers)
+	testGetCache(t, buildTestLoadingCache[string, string](t, TypeArc, size, loader), numbers)
 }
 
 func TestARCLength(t *testing.T) {
-	gc := buildTestLoadingCacheWithExpiration(t, TYPE_ARC, 2, time.Millisecond)
+	gc := buildTestLoadingCacheWithExpiration[string, string](t, TypeArc, 2, time.Millisecond)
 	gc.Get(context.Background(), "test1")
 	gc.Get(context.Background(), "test2")
 	gc.Get(context.Background(), "test3")
-	length := gc.Len(true)
+	length := gc.Len()
 	expectedLength := 2
 	if length != expectedLength {
 		t.Errorf("Expected length is %v, not %v", expectedLength, length)
 	}
 	time.Sleep(time.Millisecond)
 	gc.Get(context.Background(), "test4")
-	length = gc.Len(true)
+	gc.Compact()
+	length = gc.Len()
 	expectedLength = 1
 	if length != expectedLength {
 		t.Errorf("Expected length is %v, not %v", expectedLength, length)
@@ -42,7 +43,7 @@ func TestARCLength(t *testing.T) {
 func TestARCEvictItem(t *testing.T) {
 	cacheSize := 10
 	numbers := cacheSize + 1
-	gc := buildTestLoadingCache(t, TYPE_ARC, cacheSize, loader)
+	gc := buildTestLoadingCache[string, string](t, TypeArc, cacheSize, loader)
 
 	for i := 0; i < numbers; i++ {
 		_, err := gc.Get(context.Background(), fmt.Sprintf("Key-%d", i))
@@ -55,10 +56,10 @@ func TestARCEvictItem(t *testing.T) {
 func TestARCPurgeCache(t *testing.T) {
 	cacheSize := 10
 	purgeCount := 0
-	gc := New[any, any](cacheSize).
+	gc := New[string, string](cacheSize).
 		ARC().
-		LoaderFunc(loader).
-		PurgeVisitorFunc(func(k, v interface{}) {
+		LoaderFunc(loader[string, string]).
+		PurgeVisitorFunc(func(k string, v *string) {
 			purgeCount++
 		}).
 		Build()
@@ -70,7 +71,7 @@ func TestARCPurgeCache(t *testing.T) {
 		}
 	}
 
-	gc.Purge()
+	gc.Clear()
 
 	if purgeCount != cacheSize {
 		t.Errorf("failed to purge everything")
@@ -78,11 +79,11 @@ func TestARCPurgeCache(t *testing.T) {
 }
 
 func TestARCGetIFPresent(t *testing.T) {
-	testGetIFPresent(t, TYPE_ARC)
+	testGetIFPresent(t, TypeArc)
 }
 
 func TestARCHas(t *testing.T) {
-	gc := buildTestLoadingCacheWithExpiration(t, TYPE_ARC, 2, 10*time.Millisecond)
+	gc := buildTestLoadingCacheWithExpiration[string, string](t, TypeArc, 2, 10*time.Millisecond)
 
 	for i := 0; i < 10; i++ {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {

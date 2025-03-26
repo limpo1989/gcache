@@ -2,29 +2,33 @@ package gcache
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/limpo1989/arena"
 )
 
 func TestLoaderFunc(t *testing.T) {
 	size := 2
-	var testCaches = []*CacheBuilder[any, any]{
-		New[any, any](size).Simple(),
-		New[any, any](size).LRU(),
-		New[any, any](size).LFU(),
-		New[any, any](size).ARC(),
+	var testCaches = []*CacheBuilder[int, int64]{
+		New[int, int64](size).Simple(),
+		New[int, int64](size).LRU(),
+		New[int, int64](size).LFU(),
+		New[int, int64](size).ARC(),
 	}
 	for _, builder := range testCaches {
 		var testCounter int64
 		counter := 1000
 		cache := builder.
-			LoaderFunc(func(ctx context.Context, key interface{}) (interface{}, error) {
+			LoaderFunc(func(ctx context.Context, key int) (int64, error) {
 				time.Sleep(10 * time.Millisecond)
-				return atomic.AddInt64(&testCounter, 1), nil
+				value := atomic.AddInt64(&testCounter, 1)
+				return value, nil
 			}).
-			EvictedFunc(func(key, value interface{}) {
+			EvictedFunc(func(key int, value *int64) {
 				panic(key)
 			}).Build()
 
@@ -49,20 +53,21 @@ func TestLoaderFunc(t *testing.T) {
 
 func TestLoaderExpireFuncWithoutExpire(t *testing.T) {
 	size := 2
-	var testCaches = []*CacheBuilder[any, any]{
-		New[any, any](size).Simple(),
-		New[any, any](size).LRU(),
-		New[any, any](size).LFU(),
-		New[any, any](size).ARC(),
+	var testCaches = []*CacheBuilder[int, int64]{
+		New[int, int64](size).Simple(),
+		New[int, int64](size).LRU(),
+		New[int, int64](size).LFU(),
+		New[int, int64](size).ARC(),
 	}
 	for _, builder := range testCaches {
 		var testCounter int64
 		counter := 1000
 		cache := builder.
-			LoaderExpireFunc(func(ctx context.Context, key interface{}) (interface{}, *time.Duration, error) {
-				return atomic.AddInt64(&testCounter, 1), nil, nil
+			LoaderExpireFunc(func(ctx context.Context, key int) (int64, time.Duration, error) {
+				value := atomic.AddInt64(&testCounter, 1)
+				return value, 0, nil
 			}).
-			EvictedFunc(func(key, value interface{}) {
+			EvictedFunc(func(key int, value *int64) {
 				panic(key)
 			}).Build()
 
@@ -88,19 +93,20 @@ func TestLoaderExpireFuncWithoutExpire(t *testing.T) {
 
 func TestLoaderExpireFuncWithExpire(t *testing.T) {
 	size := 2
-	var testCaches = []*CacheBuilder[any, any]{
-		New[any, any](size).Simple(),
-		New[any, any](size).LRU(),
-		New[any, any](size).LFU(),
-		New[any, any](size).ARC(),
+	var testCaches = []*CacheBuilder[int, int64]{
+		New[int, int64](size).Simple(),
+		New[int, int64](size).LRU(),
+		New[int, int64](size).LFU(),
+		New[int, int64](size).ARC(),
 	}
 	for _, builder := range testCaches {
 		var testCounter int64
 		counter := 1000
 		expire := 200 * time.Millisecond
 		cache := builder.
-			LoaderExpireFunc(func(ctx context.Context, key interface{}) (interface{}, *time.Duration, error) {
-				return atomic.AddInt64(&testCounter, 1), &expire, nil
+			LoaderExpireFunc(func(ctx context.Context, key int) (int64, time.Duration, error) {
+				value := atomic.AddInt64(&testCounter, 1)
+				return value, expire, nil
 			}).
 			Build()
 
@@ -139,23 +145,23 @@ func TestLoaderPurgeVisitorFunc(t *testing.T) {
 	size := 7
 	tests := []struct {
 		name         string
-		cacheBuilder *CacheBuilder[any, any]
+		cacheBuilder *CacheBuilder[int, int64]
 	}{
 		{
 			name:         "simple",
-			cacheBuilder: New[any, any](size).Simple(),
+			cacheBuilder: New[int, int64](size).Simple(),
 		},
 		{
 			name:         "lru",
-			cacheBuilder: New[any, any](size).LRU(),
+			cacheBuilder: New[int, int64](size).LRU(),
 		},
 		{
 			name:         "lfu",
-			cacheBuilder: New[any, any](size).LFU(),
+			cacheBuilder: New[int, int64](size).LFU(),
 		},
 		{
 			name:         "arc",
-			cacheBuilder: New[any, any](size).ARC(),
+			cacheBuilder: New[int, int64](size).ARC(),
 		},
 	}
 
@@ -163,13 +169,14 @@ func TestLoaderPurgeVisitorFunc(t *testing.T) {
 		var purgeCounter, evictCounter, loaderCounter int64
 		counter := 1000
 		cache := test.cacheBuilder.
-			LoaderFunc(func(ctx context.Context, key interface{}) (interface{}, error) {
-				return atomic.AddInt64(&loaderCounter, 1), nil
+			LoaderFunc(func(ctx context.Context, key int) (int64, error) {
+				value := atomic.AddInt64(&loaderCounter, 1)
+				return value, nil
 			}).
-			EvictedFunc(func(key, value interface{}) {
+			EvictedFunc(func(key int, value *int64) {
 				atomic.AddInt64(&evictCounter, 1)
 			}).
-			PurgeVisitorFunc(func(k, v interface{}) {
+			PurgeVisitorFunc(func(k int, v *int64) {
 				atomic.AddInt64(&purgeCounter, 1)
 			}).
 			Build()
@@ -193,7 +200,7 @@ func TestLoaderPurgeVisitorFunc(t *testing.T) {
 			t.Errorf("%s: loaderCounter != %v", test.name, loaderCounter)
 		}
 
-		cache.Purge()
+		cache.Clear()
 
 		if evictCounter+purgeCounter != loaderCounter {
 			t.Logf("%s: evictCounter: %d", test.name, evictCounter)
@@ -208,18 +215,18 @@ func TestDeserializeFunc(t *testing.T) {
 	var cases = []struct {
 		tp string
 	}{
-		{TYPE_SIMPLE},
-		{TYPE_LRU},
-		{TYPE_LFU},
-		{TYPE_ARC},
+		{TypeSimple},
+		{TypeLru},
+		{TypeLfu},
+		{TypeArc},
 	}
 
 	for _, cs := range cases {
 		key1, value1 := "key1", "value1"
 		key2, value2 := "key2", "value2"
-		cc := New[any, any](32).
+		cc := New[string, string](32).
 			EvictType(cs.tp).
-			LoaderFunc(func(ctx context.Context, k interface{}) (interface{}, error) {
+			LoaderFunc(func(ctx context.Context, k string) (string, error) {
 				return value1, nil
 			}).
 			Build()
@@ -227,14 +234,14 @@ func TestDeserializeFunc(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v != value1 {
+		if *v != value1 {
 			t.Errorf("%v != %v", v, value1)
 		}
 		v, err = cc.Get(context.Background(), key1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v != value1 {
+		if *v != value1 {
 			t.Errorf("%v != %v", v, value1)
 		}
 		if err := cc.Set(key2, value2); err != nil {
@@ -244,7 +251,7 @@ func TestDeserializeFunc(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		if v != value2 {
+		if *v != value2 {
 			t.Errorf("%v != %v", v, value2)
 		}
 	}
@@ -252,14 +259,102 @@ func TestDeserializeFunc(t *testing.T) {
 
 func TestExpiredItems(t *testing.T) {
 	var tps = []string{
-		TYPE_SIMPLE,
-		TYPE_LRU,
-		TYPE_LFU,
-		TYPE_ARC,
+		TypeSimple,
+		TypeLru,
+		TypeLfu,
+		TypeArc,
 	}
 	for _, tp := range tps {
 		t.Run(tp, func(t *testing.T) {
 			testExpiredItems(t, tp)
 		})
 	}
+}
+
+func TestTouchItems(t *testing.T) {
+	var tps = []string{
+		TypeSimple,
+		TypeLru,
+		TypeLfu,
+		TypeArc,
+	}
+	for _, tp := range tps {
+		t.Run(tp, func(t *testing.T) {
+			testTouchItems(t, tp)
+		})
+	}
+}
+
+type testPlayer struct {
+	id         int
+	name       string
+	level      int
+	createTime time.Time
+}
+
+const largeSize = 1000 * 1000 * 10
+
+func TestHeapCache(t *testing.T) {
+
+	var now = time.Now()
+
+	cache := New[int, testPlayer](largeSize).
+		LoaderFunc(func(ctx context.Context, idx int) (testPlayer, error) {
+			return testPlayer{id: idx, name: "test_player", level: idx, createTime: now.Add(time.Second * time.Duration(idx))}, nil
+		}).
+		Simple().
+		Build()
+
+	for i := 0; i < largeSize; i++ {
+		p, err := cache.Get(context.Background(), i)
+		if nil != err {
+			t.Fatal(err)
+		}
+
+		if p.id != i {
+			t.Errorf("%d != %d", i, p.id)
+		}
+	}
+
+	start := time.Now()
+	runtime.GC()
+	var memStat runtime.MemStats
+	runtime.ReadMemStats(&memStat)
+	t.Logf("Heap Cache GC took time: %v, cache size: %d, living objects: %d", time.Since(start), cache.Len(), memStat.HeapObjects)
+	runtime.KeepAlive(cache)
+}
+
+func TestArenaCache(t *testing.T) {
+
+	var now = time.Now()
+
+	// 或者直接初始化local location
+	_ = time.Local.String()
+
+	cache := New[int, testPlayer](largeSize).
+		LoaderFunc(func(ctx context.Context, idx int) (testPlayer, error) {
+			return testPlayer{id: idx, name: "test_player", level: idx, createTime: now.Add(time.Second * time.Duration(idx))}, nil
+		}).
+		Arena(arena.WithChunkSize(1024 * 1024)).
+		Simple().
+		Build()
+
+	for i := 0; i < largeSize; i++ {
+		cache.GetFn(context.Background(), i, func(p *testPlayer, err error) {
+			if nil != err {
+				t.Fatal(err)
+			}
+
+			if p.id != i {
+				t.Errorf("%d != %d", i, p.id)
+			}
+		})
+	}
+
+	start := time.Now()
+	runtime.GC()
+	var memStat runtime.MemStats
+	runtime.ReadMemStats(&memStat)
+	t.Logf("Arena Cache GC took time: %v, cache size: %d, living objects: %d", time.Since(start), cache.Len(), memStat.HeapObjects)
+	runtime.KeepAlive(cache)
 }
