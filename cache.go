@@ -269,7 +269,7 @@ func (c *baseCache[K, V]) calcExpiration(expiration time.Duration) time.Time {
 }
 
 // load a new value using by specified key.
-func (c *baseCache[K, V]) load(ctx context.Context, key K, withLock bool, cb func(*V, time.Duration) (*V, error)) (*V, error) {
+func (c *baseCache[K, V]) load(ctx context.Context, key K, cb func(*V, time.Duration) (*V, error)) (*V, error) {
 	v, err, _ := c.loadGroup.Do(key, func() (v *V, e error) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -277,12 +277,7 @@ func (c *baseCache[K, V]) load(ctx context.Context, key K, withLock bool, cb fun
 			}
 		}()
 
-		if withLock {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-		}
-
-		if value, err := c.fetch(key, true, false, true); err == nil {
+		if value, err := c.fetch(key, true, true, true); err == nil {
 			return value, nil
 		}
 
@@ -294,6 +289,10 @@ func (c *baseCache[K, V]) load(ctx context.Context, key K, withLock bool, cb fun
 		if 0 == expire {
 			expire = c.expiration
 		}
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
 		return cb(value, expire)
 	})
 	return v, err

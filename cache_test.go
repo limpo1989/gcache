@@ -358,3 +358,38 @@ func TestArenaCache(t *testing.T) {
 	t.Logf("Arena Cache GC took time: %v, cache size: %d, living objects: %d", time.Since(start), cache.Len(), memStat.HeapObjects)
 	runtime.KeepAlive(cache)
 }
+
+func TestSlowLoaderFunc(t *testing.T) {
+	size := 2000
+	var testCaches = []*CacheBuilder[int, int64]{
+		New[int, int64](size).Simple(),
+		New[int, int64](size).LRU(),
+		New[int, int64](size).LFU(),
+		New[int, int64](size).ARC(),
+	}
+	for _, builder := range testCaches {
+		var startTime = time.Now()
+		counter := 1000
+		cache := builder.
+			LoaderFunc(func(ctx context.Context, key int) (*int64, error) {
+				time.Sleep(10 * time.Millisecond)
+				value := int64(key)
+				return &value, nil
+			}).Build()
+
+		var wg sync.WaitGroup
+		for i := 0; i < counter; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, err := cache.Get(context.Background(), i)
+				if err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+
+		wg.Wait()
+		t.Logf("load all items cost %v", time.Since(startTime))
+	}
+}

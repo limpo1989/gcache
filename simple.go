@@ -92,7 +92,7 @@ func (c *SimpleCache[K, V]) Get(ctx context.Context, key K) (*V, error) {
 	}
 	v, err := c.getValue(key, false, true, c.autoRenewal)
 	if nil != err && errors.Is(err, ErrKeyNotFound) {
-		return c.getWithLoader(ctx, key, true)
+		return c.getWithLoader(ctx, key)
 	}
 	return v, err
 }
@@ -112,12 +112,17 @@ func (c *SimpleCache[K, V]) GetIfPresent(ctx context.Context, key K) (*V, error)
 // If the key is not present in the cache and the cache does not have a LoaderFunc,
 // Callback ErrKeyNotFound.
 func (c *SimpleCache[K, V]) GetFn(ctx context.Context, key K, fn func(value *V, err error)) {
+
+	v, err := c.getValue(key, false, true, false)
+	if nil != err && errors.Is(err, ErrKeyNotFound) {
+		v, err = c.getWithLoader(ctx, key)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	v, err := c.getValue(key, false, false, c.autoRenewal)
-	if nil != err && errors.Is(err, ErrKeyNotFound) {
-		v, err = c.getWithLoader(ctx, key, false)
+	if nil == err {
+		v, err = c.getValue(key, false, false, c.autoRenewal)
 	}
 
 	fn(v, err)
@@ -140,7 +145,7 @@ func (c *SimpleCache[K, V]) GetIfPresentFn(ctx context.Context, key K, fn func(v
 func (c *SimpleCache[K, V]) Touch(ctx context.Context, key K) error {
 	_, err := c.getValue(key, false, true, true)
 	if nil != err && errors.Is(err, ErrKeyNotFound) {
-		_, err = c.getWithLoader(ctx, key, true)
+		_, err = c.getWithLoader(ctx, key)
 	}
 	return err
 }
@@ -197,11 +202,11 @@ func (c *SimpleCache[K, V]) getValue(key K, onLoad, withLock, renewal bool) (*V,
 	return nil, ErrKeyNotFound
 }
 
-func (c *SimpleCache[K, V]) getWithLoader(ctx context.Context, key K, withLock bool) (*V, error) {
+func (c *SimpleCache[K, V]) getWithLoader(ctx context.Context, key K) (*V, error) {
 	if c.loaderExpireFunc == nil {
 		return nil, ErrKeyNotFound
 	}
-	return c.load(ctx, key, withLock, func(val *V, expiration time.Duration) (*V, error) {
+	return c.load(ctx, key, func(val *V, expiration time.Duration) (*V, error) {
 		value := c.obtain(val)
 		e := c.setWithExpire(key, value, expiration)
 		return value, e
