@@ -90,7 +90,7 @@ func (c *SimpleCache[K, V]) Get(ctx context.Context, key K) (*V, error) {
 	if c.allocator != nil {
 		panic("Arena enabled please use GetFn")
 	}
-	v, err := c.getValue(key, false, true, false)
+	v, err := c.getValue(key, false, true, c.autoRenewal)
 	if nil != err && errors.Is(err, ErrKeyNotFound) {
 		return c.getWithLoader(ctx, key, true)
 	}
@@ -103,7 +103,7 @@ func (c *SimpleCache[K, V]) GetIfPresent(ctx context.Context, key K) (*V, error)
 	if c.allocator != nil {
 		panic("Arena enabled please use GetIfPresentFn")
 	}
-	return c.getValue(key, false, true, false)
+	return c.getValue(key, false, true, c.autoRenewal)
 }
 
 // GetFn callbacks the value for the specified key if it is present in the cache.
@@ -115,7 +115,7 @@ func (c *SimpleCache[K, V]) GetFn(ctx context.Context, key K, fn func(value *V, 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	v, err := c.getValue(key, false, false, false)
+	v, err := c.getValue(key, false, false, c.autoRenewal)
 	if nil != err && errors.Is(err, ErrKeyNotFound) {
 		v, err = c.getWithLoader(ctx, key, false)
 	}
@@ -128,7 +128,7 @@ func (c *SimpleCache[K, V]) GetFn(ctx context.Context, key K, fn func(value *V, 
 func (c *SimpleCache[K, V]) GetIfPresentFn(ctx context.Context, key K, fn func(value *V, err error)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	v, err := c.getValue(key, false, false, false)
+	v, err := c.getValue(key, false, false, c.autoRenewal)
 	fn(v, err)
 }
 

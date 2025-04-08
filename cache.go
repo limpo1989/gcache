@@ -81,6 +81,7 @@ type baseCache[K comparable, V any] struct {
 	purgeVisitorFunc PurgeVisitorFunc[K, V]
 	addedFunc        AddedFunc[K, V]
 	expiration       time.Duration
+	autoRenewal      bool
 	mu               RWMutex
 	loadGroup        singleflightx.Group[K, *V]
 	fetch            func(key K, onLoad, withLock, renewal bool) (*V, error)
@@ -106,6 +107,7 @@ type CacheBuilder[K comparable, V any] struct {
 	purgeVisitorFunc PurgeVisitorFunc[K, V]
 	addedFunc        AddedFunc[K, V]
 	expiration       time.Duration
+	autoRenewal      bool
 	shared           int
 	mu               RWMutex
 	allocator        *arena.Arena
@@ -186,6 +188,11 @@ func (cb *CacheBuilder[K, V]) Expiration(expiration time.Duration) *CacheBuilder
 	return cb
 }
 
+func (cb *CacheBuilder[K, V]) AutoRenewal(autoRenewal bool) *CacheBuilder[K, V] {
+	cb.autoRenewal = autoRenewal
+	return cb
+}
+
 func (cb *CacheBuilder[K, V]) NopLocker() *CacheBuilder[K, V] {
 	cb.mu = nopRWMutex{}
 	return cb
@@ -241,6 +248,7 @@ func buildCache[K comparable, V any](c *baseCache[K, V], cb *CacheBuilder[K, V])
 	c.mu = cb.mu
 	c.loaderExpireFunc = cb.loaderExpireFunc
 	c.expiration = cb.expiration
+	c.autoRenewal = cb.autoRenewal
 	c.addedFunc = cb.addedFunc
 	c.evictedFunc = cb.evictedFunc
 	c.purgeVisitorFunc = cb.purgeVisitorFunc
