@@ -71,12 +71,12 @@ func (c *ARC[K, V]) replace(key K) {
 	}
 }
 
-func (c *ARC[K, V]) Set(key K, value V) error {
+func (c *ARC[K, V]) Set(key K, value *V) error {
 	return c.SetWithExpire(key, value, c.expiration)
 }
 
 // SetWithExpire a new key-value pair with an expiration time
-func (c *ARC[K, V]) SetWithExpire(key K, value V, expiration time.Duration) error {
+func (c *ARC[K, V]) SetWithExpire(key K, value *V, expiration time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.setWithExpire(key, c.obtain(value), expiration)
@@ -341,7 +341,7 @@ func (c *ARC[K, V]) getWithLoader(ctx context.Context, key K, withLock bool) (*V
 	if c.loaderExpireFunc == nil {
 		return nil, ErrKeyNotFound
 	}
-	return c.load(ctx, key, withLock, func(val V, expiration time.Duration) (*V, error) {
+	return c.load(ctx, key, withLock, func(val *V, expiration time.Duration) (*V, error) {
 		value := c.obtain(val)
 		e := c.setWithExpire(key, value, expiration)
 		return value, e

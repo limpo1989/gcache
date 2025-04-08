@@ -31,12 +31,13 @@ func TestStats(t *testing.T) {
 	}
 }
 
-func getter(ctx context.Context, key int) (int, error) {
+func getter(ctx context.Context, key int) (*int, error) {
 	var value = key
-	return value, nil
+	return &value, nil
 }
 
 func TestCacheStats(t *testing.T) {
+	var value int
 	var cases = []struct {
 		builder func() Cache[int, int]
 		rate    float64
@@ -44,7 +45,7 @@ func TestCacheStats(t *testing.T) {
 		{
 			builder: func() Cache[int, int] {
 				cc := New[int, int](32).Simple().Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc
@@ -54,7 +55,7 @@ func TestCacheStats(t *testing.T) {
 		{
 			builder: func() Cache[int, int] {
 				cc := New[int, int](32).LRU().Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc
@@ -64,7 +65,7 @@ func TestCacheStats(t *testing.T) {
 		{
 			builder: func() Cache[int, int] {
 				cc := New[int, int](32).LFU().Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc
@@ -74,7 +75,7 @@ func TestCacheStats(t *testing.T) {
 		{
 			builder: func() Cache[int, int] {
 				cc := New[int, int](32).ARC().Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc
@@ -87,7 +88,7 @@ func TestCacheStats(t *testing.T) {
 					Simple().
 					LoaderFunc(getter).
 					Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc
@@ -100,7 +101,7 @@ func TestCacheStats(t *testing.T) {
 					LRU().
 					LoaderFunc(getter).
 					Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc
@@ -113,7 +114,7 @@ func TestCacheStats(t *testing.T) {
 					LFU().
 					LoaderFunc(getter).
 					Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc
@@ -126,7 +127,7 @@ func TestCacheStats(t *testing.T) {
 					ARC().
 					LoaderFunc(getter).
 					Build()
-				cc.Set(0, 0)
+				cc.Set(0, &value)
 				cc.Get(context.Background(), 0)
 				cc.Get(context.Background(), 1)
 				return cc

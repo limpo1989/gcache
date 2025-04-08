@@ -9,17 +9,17 @@ import (
 	"time"
 )
 
-func loader[K comparable, V any](ctx context.Context, key K) (V, error) {
+func loader[K comparable, V any](ctx context.Context, key K) (*V, error) {
 
 	var zero V
-	var value = reflect.New(reflect.TypeOf(zero)).Elem()
-	switch value.Kind() {
+	var value = reflect.New(reflect.TypeOf(zero))
+	switch value.Elem().Kind() {
 	case reflect.String:
-		value.SetString(fmt.Sprintf("valueFor%v", key))
+		value.Elem().SetString(fmt.Sprintf("valueFor%v", key))
 	default:
 	}
 
-	return value.Interface().(V), nil
+	return value.Interface().(*V), nil
 }
 
 func testSetCache(t *testing.T, gc Cache[string, string], numbers int) {
@@ -42,7 +42,7 @@ func testGetCache(t *testing.T, gc Cache[string, string], numbers int) {
 			t.Errorf("Unexpected error: %v", err)
 		}
 		expectedV, _ := loader[string, string](context.Background(), key)
-		if *v != expectedV {
+		if *v != *expectedV {
 			t.Errorf("Expected value is %v, not %v", expectedV, *v)
 		}
 	}
@@ -54,8 +54,8 @@ func testGetIFPresent(t *testing.T, evT string) {
 		New[any, string](8).
 			EvictType(evT).
 			LoaderFunc(
-				func(ctx context.Context, key any) (string, error) {
-					return value, nil
+				func(ctx context.Context, key any) (*string, error) {
+					return &value, nil
 				}).
 			Build()
 
@@ -68,7 +68,7 @@ func testGetIFPresent(t *testing.T, evT string) {
 func setItemsByRange(t *testing.T, c Cache[int, int], start, end int) {
 	for i := start; i < end; i++ {
 		val := i
-		if err := c.Set(i, val); err != nil {
+		if err := c.Set(i, &val); err != nil {
 			t.Error(err)
 		}
 	}
@@ -131,7 +131,7 @@ func testExpiredItems(t *testing.T, evT string) {
 	}
 
 	value := 1
-	cache.Set(1, value)
+	cache.Set(1, &value)
 }
 
 func testTouchItems(t *testing.T, evT string) {
@@ -153,7 +153,7 @@ func testTouchItems(t *testing.T, evT string) {
 	}
 
 	value := 1
-	cache.Set(1, value)
+	cache.Set(1, &value)
 }
 
 func getSimpleEvictedFunc[K comparable, V any](t *testing.T) func(K, *V) {

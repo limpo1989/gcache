@@ -89,7 +89,7 @@ func TestLFUFreqListOrder(t *testing.T) {
 	gc := buildTestCache[int, int](t, TypeLfu, 5)
 	for i := 4; i >= 0; i-- {
 		val := i
-		gc.Set(i, val)
+		gc.Set(i, &val)
 		for j := 0; j <= i; j++ {
 			gc.Get(context.Background(), i)
 		}
@@ -110,7 +110,7 @@ func TestLFUFreqListOrder(t *testing.T) {
 		t.Fatalf("%v != 5", l)
 	}
 	val := 1
-	gc.Set(1, val)
+	gc.Set(1, &val)
 	if l := gc.(*LFUCache[int, int]).freqList.Len(); l != 5 {
 		t.Fatalf("%v != 5", l)
 	}
@@ -136,7 +136,7 @@ func TestLFUFreqListLength(t *testing.T) {
 	}
 	{
 		gc := buildTestCache[string, string](t, TypeLfu, 5)
-		gc.Set(k0, v0)
+		gc.Set(k0, &v0)
 		for i := 0; i < 5; i++ {
 			gc.Get(context.Background(), k0)
 		}
@@ -147,8 +147,8 @@ func TestLFUFreqListLength(t *testing.T) {
 
 	{
 		gc := buildTestCache[string, string](t, TypeLfu, 5)
-		gc.Set(k0, v0)
-		gc.Set(k1, v1)
+		gc.Set(k0, &v0)
+		gc.Set(k1, &v1)
 		for i := 0; i < 5; i++ {
 			gc.Get(context.Background(), k0)
 			gc.Get(context.Background(), k1)
@@ -160,8 +160,8 @@ func TestLFUFreqListLength(t *testing.T) {
 
 	{
 		gc := buildTestCache[string, string](t, TypeLfu, 5)
-		gc.Set(k0, v0)
-		gc.Set(k1, v1)
+		gc.Set(k0, &v0)
+		gc.Set(k1, &v1)
 		for i := 0; i < 5; i++ {
 			gc.Get(context.Background(), k0)
 		}
@@ -178,7 +178,7 @@ func TestLFUFreqListLength(t *testing.T) {
 
 	{
 		gc := buildTestCache[string, string](t, TypeLfu, 5)
-		gc.Set(k0, v0)
+		gc.Set(k0, &v0)
 		gc.Get(context.Background(), k0)
 		if l := gc.(*LFUCache[string, string]).freqList.Len(); l != 2 {
 			t.Fatalf("%v != 2", l)
@@ -187,7 +187,7 @@ func TestLFUFreqListLength(t *testing.T) {
 		if l := gc.(*LFUCache[string, string]).freqList.Len(); l != 1 {
 			t.Fatalf("%v != 1", l)
 		}
-		gc.Set(k0, v0)
+		gc.Set(k0, &v0)
 		if l := gc.(*LFUCache[string, string]).freqList.Len(); l != 1 {
 			t.Fatalf("%v != 1", l)
 		}

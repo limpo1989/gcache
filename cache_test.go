@@ -23,10 +23,10 @@ func TestLoaderFunc(t *testing.T) {
 		var testCounter int64
 		counter := 1000
 		cache := builder.
-			LoaderFunc(func(ctx context.Context, key int) (int64, error) {
+			LoaderFunc(func(ctx context.Context, key int) (*int64, error) {
 				time.Sleep(10 * time.Millisecond)
 				value := atomic.AddInt64(&testCounter, 1)
-				return value, nil
+				return &value, nil
 			}).
 			EvictedFunc(func(key int, value *int64) {
 				panic(key)
@@ -63,9 +63,9 @@ func TestLoaderExpireFuncWithoutExpire(t *testing.T) {
 		var testCounter int64
 		counter := 1000
 		cache := builder.
-			LoaderExpireFunc(func(ctx context.Context, key int) (int64, time.Duration, error) {
+			LoaderExpireFunc(func(ctx context.Context, key int) (*int64, time.Duration, error) {
 				value := atomic.AddInt64(&testCounter, 1)
-				return value, 0, nil
+				return &value, 0, nil
 			}).
 			EvictedFunc(func(key int, value *int64) {
 				panic(key)
@@ -104,9 +104,9 @@ func TestLoaderExpireFuncWithExpire(t *testing.T) {
 		counter := 1000
 		expire := 200 * time.Millisecond
 		cache := builder.
-			LoaderExpireFunc(func(ctx context.Context, key int) (int64, time.Duration, error) {
+			LoaderExpireFunc(func(ctx context.Context, key int) (*int64, time.Duration, error) {
 				value := atomic.AddInt64(&testCounter, 1)
-				return value, expire, nil
+				return &value, expire, nil
 			}).
 			Build()
 
@@ -169,9 +169,9 @@ func TestLoaderPurgeVisitorFunc(t *testing.T) {
 		var purgeCounter, evictCounter, loaderCounter int64
 		counter := 1000
 		cache := test.cacheBuilder.
-			LoaderFunc(func(ctx context.Context, key int) (int64, error) {
+			LoaderFunc(func(ctx context.Context, key int) (*int64, error) {
 				value := atomic.AddInt64(&loaderCounter, 1)
-				return value, nil
+				return &value, nil
 			}).
 			EvictedFunc(func(key int, value *int64) {
 				atomic.AddInt64(&evictCounter, 1)
@@ -226,8 +226,8 @@ func TestDeserializeFunc(t *testing.T) {
 		key2, value2 := "key2", "value2"
 		cc := New[string, string](32).
 			EvictType(cs.tp).
-			LoaderFunc(func(ctx context.Context, k string) (string, error) {
-				return value1, nil
+			LoaderFunc(func(ctx context.Context, k string) (*string, error) {
+				return &value1, nil
 			}).
 			Build()
 		v, err := cc.Get(context.Background(), key1)
@@ -244,7 +244,7 @@ func TestDeserializeFunc(t *testing.T) {
 		if *v != value1 {
 			t.Errorf("%v != %v", v, value1)
 		}
-		if err := cc.Set(key2, value2); err != nil {
+		if err := cc.Set(key2, &value2); err != nil {
 			t.Error(err)
 		}
 		v, err = cc.Get(context.Background(), key2)
@@ -299,8 +299,8 @@ func TestHeapCache(t *testing.T) {
 	var now = time.Now()
 
 	cache := New[int, testPlayer](largeSize).
-		LoaderFunc(func(ctx context.Context, idx int) (testPlayer, error) {
-			return testPlayer{id: idx, name: "test_player", level: idx, createTime: now.Add(time.Second * time.Duration(idx))}, nil
+		LoaderFunc(func(ctx context.Context, idx int) (*testPlayer, error) {
+			return &testPlayer{id: idx, name: "test_player", level: idx, createTime: now.Add(time.Second * time.Duration(idx))}, nil
 		}).
 		Simple().
 		Build()
@@ -332,8 +332,8 @@ func TestArenaCache(t *testing.T) {
 	_ = time.Local.String()
 
 	cache := New[int, testPlayer](largeSize).
-		LoaderFunc(func(ctx context.Context, idx int) (testPlayer, error) {
-			return testPlayer{id: idx, name: "test_player", level: idx, createTime: now.Add(time.Second * time.Duration(idx))}, nil
+		LoaderFunc(func(ctx context.Context, idx int) (*testPlayer, error) {
+			return &testPlayer{id: idx, name: "test_player", level: idx, createTime: now.Add(time.Second * time.Duration(idx))}, nil
 		}).
 		Arena(arena.WithChunkSize(1024 * 1024)).
 		Simple().

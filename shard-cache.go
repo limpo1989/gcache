@@ -22,11 +22,11 @@ func (s *sharedCache[K, V]) getCache(key K) Cache[K, V] {
 	return s.caches[hash%uint64(len(s.caches))]
 }
 
-func (s *sharedCache[K, V]) Set(key K, value V) error {
+func (s *sharedCache[K, V]) Set(key K, value *V) error {
 	return s.getCache(key).Set(key, value)
 }
 
-func (s *sharedCache[K, V]) SetWithExpire(key K, value V, expiration time.Duration) error {
+func (s *sharedCache[K, V]) SetWithExpire(key K, value *V, expiration time.Duration) error {
 	return s.getCache(key).SetWithExpire(key, value, expiration)
 }
 

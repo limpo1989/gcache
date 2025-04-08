@@ -23,9 +23,9 @@ var ErrKeyNotFound = errors.New("key not found")
 
 type Cache[K comparable, V any] interface {
 	// Set inserts or updates the specified key-value pair.
-	Set(key K, value V) error
+	Set(key K, value *V) error
 	// SetWithExpire inserts or updates the specified key-value pair with an expiration time.
-	SetWithExpire(key K, value V, expiration time.Duration) error
+	SetWithExpire(key K, value *V, expiration time.Duration) error
 	// Get returns the value for the specified key if it is present in the cache.
 	// If the key is not present in the cache and the cache has LoaderFunc,
 	// invoke the `LoaderFunc` function and inserts the key-value pair in the cache.
@@ -91,8 +91,8 @@ type baseCache[K comparable, V any] struct {
 }
 
 type (
-	LoaderFunc[K comparable, V any]       func(context.Context, K) (V, error)
-	LoaderExpireFunc[K comparable, V any] func(context.Context, K) (V, time.Duration, error)
+	LoaderFunc[K comparable, V any]       func(context.Context, K) (*V, error)
+	LoaderExpireFunc[K comparable, V any] func(context.Context, K) (*V, time.Duration, error)
 	EvictedFunc[K comparable, V any]      func(K, *V)
 	PurgeVisitorFunc[K comparable, V any] func(K, *V)
 	AddedFunc[K comparable, V any]        func(K, *V)
@@ -132,7 +132,7 @@ func (cb *CacheBuilder[K, V]) Clock(clock Clock) *CacheBuilder[K, V] {
 // LoaderFunc Set a loader function.
 // loaderFunc: create a new value with this function if cached value is expired.
 func (cb *CacheBuilder[K, V]) LoaderFunc(loaderFunc LoaderFunc[K, V]) *CacheBuilder[K, V] {
-	cb.loaderExpireFunc = func(ctx context.Context, k K) (V, time.Duration, error) {
+	cb.loaderExpireFunc = func(ctx context.Context, k K) (*V, time.Duration, error) {
 		v, err := loaderFunc(ctx, k)
 		return v, 0, err
 	}
@@ -269,7 +269,7 @@ func (c *baseCache[K, V]) calcExpiration(expiration time.Duration) time.Time {
 }
 
 // load a new value using by specified key.
-func (c *baseCache[K, V]) load(ctx context.Context, key K, withLock bool, cb func(V, time.Duration) (*V, error)) (*V, error) {
+func (c *baseCache[K, V]) load(ctx context.Context, key K, withLock bool, cb func(*V, time.Duration) (*V, error)) (*V, error) {
 	v, err, _ := c.loadGroup.Do(key, func() (v *V, e error) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -299,11 +299,11 @@ func (c *baseCache[K, V]) load(ctx context.Context, key K, withLock bool, cb fun
 	return v, err
 }
 
-func (c *baseCache[K, V]) obtain(v V) *V {
+func (c *baseCache[K, V]) obtain(v *V) *V {
 	if nil == c.allocator {
-		return &v
+		return v
 	}
-	return arena.DeepCopy[V](c.allocator, v)
+	return arena.DeepCopy[V](c.allocator, *v)
 }
 
 type nopRWMutex struct{}

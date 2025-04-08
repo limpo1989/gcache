@@ -7,6 +7,7 @@ Cache library for golang. It supports expirable Cache, LFU, LRU and ARC.
 ## Features
 
 * Supports expirable Cache, LFU, LRU and ARC.
+* Auto-renewal cache items. (Optional)
 * Goroutine safe.
 * Supports event handlers which evict, purge, and add entry. (Optional)
 * Automatically load cache if it doesn't exists. (Optional)
@@ -27,6 +28,7 @@ $ go get github.com/limpo1989/gcache
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/limpo1989/gcache"
@@ -35,15 +37,16 @@ import (
 func main() {
 	gc := gcache.New[string, string](20).
 		LRU().
-		LoaderFunc(func(key string) (string, error) {
-			return "ok", nil
+		LoaderFunc(func(ctx context.Context, key string) (*string, error) {
+			value := "ok"
+			return &value, nil
 		}).
 		Build()
-	value, err := gc.Get("key")
+	value, err := gc.Get(context.Background(), "key")
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("Get:", value)
+	fmt.Println("Get:", *value)
 }
 ```
 
